@@ -1,0 +1,94 @@
+name: Collect linked CORE photo sources
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/collect-linked-photos.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: python3 -m pip install --user --quiet requests beautifulsoup4 pillow playwright
+      - name: Collect public gallery links
+        env:
+          PYTHONUNBUFFERED: '1'
+        run: |
+          python3 - <<'PY'
+          import requests, pathlib, re, json, io, html, shutil
+          from urllib.parse import urljoin, urlparse
+          from bs4 import BeautifulSoup
+          from PIL import Image, ImageOps, ImageDraw
+          from playwright.sync_api import sync_playwright
+          out=pathlib.Path('linked-photos');out.mkdir()
+          session=requests.Session();session.headers['User-Agent']='Mozilla/5.0'
+          candidates=[]
+          def scan(text, base=''):
+              text=html.unescape(text).replace('\\u003d','=').replace('\\u0026','&').replace('\\/','/')
+              for u in re.findall(r'https://lh[3-6]\.googleusercontent\.com/(?:p|gps-cs-s|geougc-cs|places)/[^"\\\s<>]+',text):
+                  u=u.split('=')[0]+'=w1600-h1200-k-no'
+                  if u not in candidates:candidates.append(u)
+              if base and 'core-stavby.cz' in base:
+                  s=BeautifulSoup(text,'html.parser')
+                  for tag in s.select('img, a[href]'):
+                      u=tag.get('data-src') or tag.get('src') or tag.get('href','')
+                      if re.search(r'\.(jpe?g|png|webp)(?:[?#]|$)',u,re.I):
+                          u=urljoin(base,u)
+                          if u not in candidates:candidates.append(u)
+          try:
+              r=session.get('https://core-stavby.cz/',timeout=20)
+              print('LINKED WEBSITE',r.status_code,r.url)
+              (out/'linked-website.html').write_text(r.text)
+              s=BeautifulSoup(r.text,'html.parser');print('WEBSITE TEXT',s.get_text(' ',strip=True)[:4500]);scan(r.text,r.url)
+              links=[]
+              for a in s.find_all('a',href=True):
+                  u=urljoin(r.url,a['href'])
+                  if urlparse(u).netloc==urlparse(r.url).netloc and re.search('realizace|galerie|reference',u,re.I) and u not in links:links.append(u)
+              for i,u in enumerate(links[:2]):
+                  r2=session.get(u,timeout=20);scan(r2.text,u)
+                  (out/('gallery-'+str(i)+'.html')).write_text(r2.text)
+          except Exception as e:print('WEBSITE ERROR',str(e)[:250])
+          executable=shutil.which('google-chrome') or shutil.which('chromium')
+          with sync_playwright() as p:
+              browser=p.chromium.launch(executable_path=executable,headless=True,args=['--no-sandbox'])
+              page=browser.new_page(viewport={'width':1440,'height':1100},locale='cs-CZ')
+              captured=[];page.on('response',lambda r:captured.append(r.url))
+              try:
+                  page.goto('https://www.google.com/maps/place/?q=CORE+stavby+a+tereny&ftid=0x470beb42ba282da3:0xe833720a1eb95f4a&hl=cs',wait_until='domcontentloaded',timeout=40000)
+                  page.wait_for_timeout(6000)
+                  reject=page.get_by_role('button',name=re.compile('Odmítnout vše|Reject all',re.I))
+                  if reject.count():reject.first.click();page.wait_for_timeout(4000)
+                  scan(page.content());scan('\n'.join(captured))
+                  text=page.locator('body').inner_text();print('MAPS TEXT',text[:4500])
+                  (out/'maps.html').write_text(page.content())
+                  print('MAPS BUTTONS',page.locator('button').evaluate_all('(els)=>els.map(e=>({text:e.innerText,label:e.getAttribute("aria-label")})).slice(0,60)'))
+                  page.screenshot(path=str(out/'maps.png'))
+              except Exception as e:print('MAPS ERROR',str(e)[:250])
+              browser.close()
+          records=[]
+          for i,u in enumerate(candidates[:20]):
+              try:
+                  r=session.get(u,timeout=15);r.raise_for_status()
+                  im=Image.open(io.BytesIO(r.content));im.load();im=ImageOps.exif_transpose(im).convert('RGB')
+                  if min(im.size)<250:continue
+                  im.thumbnail((1800,1400))
+                  name='photo-%02d.jpg'%(i+1);im.save(out/name,quality=92,optimize=True)
+                  records.append({'file':name,'url':u,'width':im.width,'height':im.height});print('PHOTO',records[-1])
+              except Exception as e:print('PHOTO ERROR',i,str(e)[:120])
+          (out/'sources.json').write_text(json.dumps({'photos':records,'candidates':candidates},ensure_ascii=False,indent=2))
+          if records:
+              sheet=Image.new('RGB',(1000,((len(records)+2)//3)*270),'white');d=ImageDraw.Draw(sheet)
+              for i,r in enumerate(records):
+                  im=Image.open(out/r['file']);im.thumbnail((318,235));x=(i%3)*333;y=(i//3)*270
+                  sheet.paste(im,(x,y));d.text((x+4,y+240),r['file'],fill='black')
+              sheet.save(out/'contact-sheet.jpg',quality=90)
+          print('COLLECTED',len(records))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: core-linked-photographs
+          path: linked-photos/
+          retention-days: 2
