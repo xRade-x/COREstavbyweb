@@ -1,0 +1,91 @@
+name: Verify published website
+on:
+  push:
+    branches: [main]
+    paths:
+      - index.html
+      - assets/**
+      - .github/workflows/verify-site.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: verify-published-website
+  cancel-in-progress: true
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    steps:
+      - name: Install image and browser test dependencies
+        run: python3 -m pip install --user --quiet pillow playwright
+      - name: Check live page, exact image bytes, and rendered images
+        env:
+          PYTHONUNBUFFERED: '1'
+        run: |
+          python3 - <<'PY'
+          import hashlib, io, json, shutil, time, urllib.request
+          from PIL import Image
+          from playwright.sync_api import sync_playwright
+          base = 'https://xrade-x.github.io/COREstavbyweb/'
+          assets = {
+              'assets/core-logo.webp': ('9892d578136b29d8efc2fc9b34525789ffd73a2b', (842, 455)),
+              'assets/earthworks-hero.webp': ('da5527f35618ae6d6ee547454abd4dce039492e2', (1000, 500)),
+          }
+          def download(path):
+              url = base + path + ('&' if '?' in path else '?') + 'verify=' + str(time.time_ns())
+              request = urllib.request.Request(url, headers={'User-Agent': 'CORE-STAVBY-Website-Test', 'Cache-Control': 'no-cache'})
+              with urllib.request.urlopen(request, timeout=20) as response:
+                  assert response.status == 200, response.status
+                  return response.read(), response.headers.get('Content-Type', '')
+          last_error = None
+          for attempt in range(18):
+              try:
+                  raw, content_type = download('')
+                  html = raw.decode('utf-8')
+                  assert 'images-fixed-v3' in html, 'New version is not yet served by Pages'
+                  for path, (expected_sha, expected_size) in assets.items():
+                      assert './' + path in html, 'Missing image reference: ' + path
+                      data, mime = download(path)
+                      actual_sha = hashlib.sha1(('blob ' + str(len(data)) + '\0').encode() + data).hexdigest()
+                      assert actual_sha == expected_sha, (path, actual_sha, expected_sha)
+                      with Image.open(io.BytesIO(data)) as image:
+                          image.load()
+                          assert image.size == expected_size, image.size
+                      assert mime.startswith('image/'), (path, mime)
+                      print('PASS LIVE ASSET', path, len(data), expected_size, actual_sha)
+                  print('PASS LIVE HTML: images-fixed-v3')
+                  break
+              except Exception as error:
+                  last_error = error
+                  print('Waiting for Pages deployment:', str(error))
+                  time.sleep(10)
+          else:
+              raise RuntimeError('Live site failed verification') from last_error
+          executable = shutil.which('google-chrome') or shutil.which('chromium') or shutil.which('chromium-browser')
+          assert executable, 'A Chromium browser is required for the rendering test'
+          with sync_playwright() as p:
+              browser = p.chromium.launch(executable_path=executable, headless=True, args=['--no-sandbox'])
+              for width, height in [(1440, 1000), (390, 844), (320, 720)]:
+                  page = browser.new_page(viewport={'width': width, 'height': height}, reduced_motion='reduce')
+                  errors = []
+                  page.on('pageerror', lambda error: errors.append(str(error)))
+                  response = page.goto(base + '?verify=' + str(time.time_ns()), wait_until='networkidle', timeout=45000)
+                  assert response.status == 200, response.status
+                  assert page.locator('meta[name="site-version"]').get_attribute('content') == 'images-fixed-v3'
+                  page.evaluate("document.querySelectorAll('img').forEach(i => i.loading='eager')")
+                  page.wait_for_function('Array.from(document.images).every(i => i.complete && i.naturalWidth > 0)', timeout=30000)
+                  images = page.evaluate('Array.from(document.images).map(i => ({src: i.currentSrc, width: i.naturalWidth, height: i.naturalHeight}))')
+                  assert len(images) == 4, images
+                  assert not page.evaluate('document.documentElement.scrollWidth > innerWidth'), 'Horizontal overflow'
+                  assert not errors, errors
+                  if width < 600:
+                      page.locator('.menu').click()
+                      assert page.locator('.menu').get_attribute('aria-expanded') == 'true'
+                      page.locator('.links a').first.click()
+                      assert page.locator('.menu').get_attribute('aria-expanded') == 'false'
+                  print('PASS LIVE BROWSER', width, json.dumps(images))
+                  page.close()
+              browser.close()
+          print('ALL LIVE CHECKS PASSED')
+          PY
