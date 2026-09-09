@@ -1,0 +1,103 @@
+name: Prepare real CORE photographs
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/prepare-real-photos.yml]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: python3 -m pip install --user --quiet requests beautifulsoup4 pillow playwright
+      - name: Prepare image files and the matching website revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYTHONUNBUFFERED: '1'
+        run: |
+          python3 - <<'PY'
+          import requests, os, base64, io, json, re, pathlib, hashlib, shutil
+          from PIL import Image, ImageOps
+          from bs4 import BeautifulSoup
+          from playwright.sync_api import sync_playwright
+          out=pathlib.Path('prepared-site');(out/'assets').mkdir(parents=True)
+          api='https://api.github.com/repos/xRade-x/COREstavbyweb/'
+          gh=requests.Session();gh.headers.update({'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json'})
+          def get_file(path):
+              r=gh.get(api+'contents/'+path,params={'ref':'main'},timeout=25);r.raise_for_status();j=r.json()
+              return base64.b64decode(j['content']),j['sha']
+          def blob(data):
+              r=gh.post(api+'git/blobs',json={'content':base64.b64encode(data).decode(),'encoding':'base64'},timeout=25);r.raise_for_status()
+              sha=r.json()['sha'];expected=hashlib.sha1(('blob '+str(len(data))+'\0').encode()+data).hexdigest()
+              assert sha==expected
+              return sha
+          original,original_sha=get_file('index.html')
+          assert original_sha=='71c7148a69721fc6b294d3c517e3595562b85c7f', 'The page changed; review the new source before patching'
+          verify,verify_sha=get_file('.github/workflows/verify-site.yml')
+          logo,logo_sha=get_file('assets/core-logo.webp');(out/'assets/core-logo.webp').write_bytes(logo)
+          photos=[
+            ('zaklady-stavby','https://lh3.googleusercontent.com/gps-cs-s/AHRPTWkr3Nithlc4LwbBTLCRnmEuSjEUeKOetcx3cBd2Xri8P2i2HRfyJtOibOk_fbHxIJJr3GGAYjVgrB5OtIb1OVOFJ3stJWV_0Hje7bH1TOq_bAaGPtinSQfDmn9MGfxp7yfj9l5L=w1600-h1200-k-no'),
+            ('kubota-demolice','https://lh3.googleusercontent.com/gps-cs-s/AHRPTWl3yGFVfjLVvwoqU6c6f7RUms-XEBY9Jh12ywL0ZZAT5STBERP9AFo3z8zin-et9mTjyDc5nYe8_YETQZsarzC-hmxucj_CDjrYRzrMYF0ZXKLFWvKonjhiktB6zRN3KLCRHPHh-A=w1600-h1200-k-no')
+          ]
+          entries=[];expected={'assets/core-logo.webp':(logo_sha,(842,455))};sources=[]
+          for name,url in photos:
+              r=requests.get(url,timeout=25);r.raise_for_status();im=Image.open(io.BytesIO(r.content));im.load();im=ImageOps.exif_transpose(im).convert('RGB')
+              assert im.width>=1500 and im.height>=850,im.size
+              sources.append({'name':name,'source':url,'source_dimensions':[im.width,im.height]})
+              for size,suffix in [(1600,''),(800,'-800')]:
+                  image=im.copy();image.thumbnail((size,1400),Image.Resampling.LANCZOS)
+                  path='assets/'+name+suffix+'.webp';image.save(out/path,format='WEBP',quality=84,method=6)
+                  data=(out/path).read_bytes();sha=blob(data)
+                  entries.append({'path':path,'mode':'100644','type':'blob','sha':sha});expected[path]=(sha,image.size)
+                  print('PREPARED IMAGE',path,len(data),image.size,sha)
+          soup=BeautifulSoup(original.decode('utf-8'),'html.parser')
+          soup.select_one('meta[name="site-version"]')['content']='real-photos-v4'
+          soup.select_one('link[rel="preload"]')['href']='./assets/kubota-demolice.webp'
+          hero=soup.select_one('.hero-image');hero['src']='./assets/kubota-demolice.webp';hero['srcset']='./assets/kubota-demolice-800.webp 800w, ./assets/kubota-demolice.webp 1600w';hero['sizes']='100vw';hero['width']='1600';hero['height']='900';hero['alt']='Bagr Kubota při demolici – fotografie z realizace CORE stavby a terény'
+          soup.select_one('.image-caption').string='Z našich realizací · demolice'
+          machine=soup.select_one('.machine-photo img');machine['src']='./assets/kubota-demolice.webp';machine['srcset']=hero['srcset'];machine['sizes']='(max-width: 900px) 100vw, 650px';machine['width']='1600';machine['height']='900';machine['alt']='Pásový bagr Kubota při bourání zdiva'
+          soup.select_one('.machine-photo figcaption').string='Naše technika při práci. Skutečná fotografie z firemního profilu CORE – stavby a terény.'
+          gallery='''<section class="refs section" id="realizace"><div class="wrap"><div class="head"><div><div class="kicker">NAŠE REALIZACE</div><h2>Naše práce.<br>Skutečné výsledky.</h2></div><p>Příprava základů i demolice s technikou Kubota. Podívejte se na fotografie z našich realizací.</p></div><div class="refgrid">
+          <article class="ref"><a class="ref-image-link" href="./assets/zaklady-stavby.webp" target="_blank" rel="noopener" aria-label="Zvětšit fotografii přípravy základů"><img class="ref-image" src="./assets/zaklady-stavby.webp" srcset="./assets/zaklady-stavby-800.webp 800w, ./assets/zaklady-stavby.webp 1600w" sizes="(max-width: 900px) 100vw, 580px" width="1600" height="1200" loading="lazy" decoding="async" alt="Příprava základové desky – bednění, výztuž a štěrkový podklad"></a><div class="ref-content"><b>STAVEBNÍ PRÁCE</b><h3>Příprava základové desky</h3><p>Bednění, výztuž a příprava podkladu pro základovou desku.</p></div></article>
+          <article class="ref"><a class="ref-image-link" href="./assets/kubota-demolice.webp" target="_blank" rel="noopener" aria-label="Zvětšit fotografii demolice bagrem Kubota"><img class="ref-image" src="./assets/kubota-demolice.webp" srcset="./assets/kubota-demolice-800.webp 800w, ./assets/kubota-demolice.webp 1600w" sizes="(max-width: 900px) 100vw, 580px" width="1600" height="900" loading="lazy" decoding="async" alt="Demolice zděného objektu pásovým bagrem Kubota"></a><div class="ref-content"><b>DEMOLICE A BOURÁNÍ</b><h3>Kubota v akci</h3><p>Bourání zděného objektu s využitím pásového bagru.</p></div></article>
+          </div><p class="gallery-source"><a href="https://maps.app.goo.gl/jye6wsNDogomYBev6" target="_blank" rel="noopener">Další fotografie na našem profilu Google Maps <span aria-hidden="true">↗</span></a></p></div></section>'''
+          soup.select_one('#realizace').replace_with(BeautifulSoup(gallery,'html.parser'))
+          extra=soup.new_tag('style');extra.string='''.hero-image{object-position:60% center}.machine-photo img{object-position:58% center}.refgrid{grid-template-columns:repeat(2,minmax(0,1fr));gap:24px}.ref{padding:0;overflow:hidden}.ref-image-link{display:block;overflow:hidden}.ref-image{width:100%;height:310px;object-fit:cover;transition:transform .25s}.ref-image-link:hover .ref-image{transform:scale(1.025)}.ref-content{padding:26px}.ref-content h3{margin:12px 0}.ref-content p{margin-bottom:0}.gallery-source{margin:28px 0 0;font-size:14px}.gallery-source a{font-weight:700;text-underline-offset:4px}@media(max-width:900px){.refgrid{grid-template-columns:1fr}.ref-image{height:350px}}@media(max-width:600px){.ref-image{height:250px}.ref-content{padding:23px}.hero-image{object-position:63% center}}'''
+          soup.head.append(extra)
+          soup.select_one('.foot small').string='Pracovní náhled · verze 4 · skutečné fotografie'
+          new_html=str(soup)
+          assert 'Ilustrační' not in new_html and 'earthworks-hero.webp' not in new_html
+          assert len(soup.select('img'))==6
+          (out/'index.html').write_text(new_html,encoding='utf-8')
+          verify=verify.decode('utf-8').replace('images-fixed-v3','real-photos-v4').replace('len(images) == 4','len(images) == 6')
+          verify,n=re.subn(r'          assets = \{.*?\n          \}', '          assets = '+repr(expected), verify, count=1, flags=re.S);assert n==1
+          verify=verify.replace("                  page.close()", "                  page.screenshot(path='live-'+str(width)+'.png', full_page=True)\n                  page.close()")
+          verify+='      - name: Save live browser screenshots\n        if: always()\n        uses: actions/upload-artifact@v4\n        with:\n          name: live-site-real-photos\n          path: live-*.png\n          retention-days: 2\n'
+          (out/'verify-site.yml').write_text(verify,encoding='utf-8')
+          source_data=json.dumps({'profile':'https://maps.app.goo.gl/jye6wsNDogomYBev6','photographs':sources},ensure_ascii=False,indent=2).encode('utf-8')
+          (out/'assets/photo-sources.json').write_bytes(source_data)
+          for path,data in [('index.html',new_html.encode()),('.github/workflows/verify-site.yml',verify.encode()),('assets/photo-sources.json',source_data)]:
+              sha=blob(data);entries.append({'path':path,'mode':'100644','type':'blob','sha':sha})
+          (out/'prepared-blobs.json').write_text(json.dumps({'source_index_sha':original_sha,'source_verify_sha':verify_sha,'entries':entries,'expected':expected},indent=2))
+          with sync_playwright() as p:
+              browser=p.chromium.launch(executable_path=shutil.which('google-chrome'),headless=True,args=['--no-sandbox'])
+              for width,height in [(1440,1000),(390,844),(320,720)]:
+                  page=browser.new_page(viewport={'width':width,'height':height})
+                  page.goto((out/'index.html').resolve().as_uri(),wait_until='networkidle')
+                  page.evaluate("document.querySelectorAll('img').forEach(i=>i.loading='eager')")
+                  page.wait_for_function('Array.from(document.images).every(i=>i.complete && i.naturalWidth>0)')
+                  assert not page.evaluate('document.documentElement.scrollWidth>innerWidth')
+                  page.screenshot(path=str(out/('preview-'+str(width)+'.png')),full_page=True)
+                  print('PASS LOCAL BROWSER',width)
+                  page.close()
+              browser.close()
+          print('PREPARED BLOBS',json.dumps(entries))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: core-real-photos-ready
+          path: prepared-site/
+          retention-days: 2
