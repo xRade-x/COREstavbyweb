@@ -28,10 +28,7 @@ jobs:
           from PIL import Image
           from playwright.sync_api import sync_playwright
           base = 'https://xrade-x.github.io/COREstavbyweb/'
-          assets = {
-              'assets/core-logo.webp': ('9892d578136b29d8efc2fc9b34525789ffd73a2b', (842, 455)),
-              'assets/earthworks-hero.webp': ('da5527f35618ae6d6ee547454abd4dce039492e2', (1000, 500)),
-          }
+          assets = {'assets/core-logo.webp': ('9892d578136b29d8efc2fc9b34525789ffd73a2b', (842, 455)), 'assets/zaklady-stavby.webp': ('617ba73b3edb5bfdc840560852afb3e83ffb12fe', (1600, 1200)), 'assets/zaklady-stavby-800.webp': ('80d0625da7f33afbb5e66cd8e21e2fd54ad90808', (800, 600)), 'assets/kubota-demolice.webp': ('0c06a2db528201eeeaea155702ddf2202fc17e15', (1600, 900)), 'assets/kubota-demolice-800.webp': ('3b7f92ae9634c7f8d6df007910d48a8eed30fe1f', (800, 450))}
           def download(path):
               url = base + path + ('&' if '?' in path else '?') + 'verify=' + str(time.time_ns())
               request = urllib.request.Request(url, headers={'User-Agent': 'CORE-STAVBY-Website-Test', 'Cache-Control': 'no-cache'})
@@ -43,7 +40,7 @@ jobs:
               try:
                   raw, content_type = download('')
                   html = raw.decode('utf-8')
-                  assert 'images-fixed-v3' in html, 'New version is not yet served by Pages'
+                  assert 'real-photos-v4' in html, 'New version is not yet served by Pages'
                   for path, (expected_sha, expected_size) in assets.items():
                       assert './' + path in html, 'Missing image reference: ' + path
                       data, mime = download(path)
@@ -54,7 +51,7 @@ jobs:
                           assert image.size == expected_size, image.size
                       assert mime.startswith('image/'), (path, mime)
                       print('PASS LIVE ASSET', path, len(data), expected_size, actual_sha)
-                  print('PASS LIVE HTML: images-fixed-v3')
+                  print('PASS LIVE HTML: real-photos-v4')
                   break
               except Exception as error:
                   last_error = error
@@ -72,11 +69,11 @@ jobs:
                   page.on('pageerror', lambda error: errors.append(str(error)))
                   response = page.goto(base + '?verify=' + str(time.time_ns()), wait_until='networkidle', timeout=45000)
                   assert response.status == 200, response.status
-                  assert page.locator('meta[name="site-version"]').get_attribute('content') == 'images-fixed-v3'
+                  assert page.locator('meta[name="site-version"]').get_attribute('content') == 'real-photos-v4'
                   page.evaluate("document.querySelectorAll('img').forEach(i => i.loading='eager')")
                   page.wait_for_function('Array.from(document.images).every(i => i.complete && i.naturalWidth > 0)', timeout=30000)
                   images = page.evaluate('Array.from(document.images).map(i => ({src: i.currentSrc, width: i.naturalWidth, height: i.naturalHeight}))')
-                  assert len(images) == 4, images
+                  assert len(images) == 6, images
                   assert not page.evaluate('document.documentElement.scrollWidth > innerWidth'), 'Horizontal overflow'
                   assert not errors, errors
                   if width < 600:
@@ -85,7 +82,15 @@ jobs:
                       page.locator('.links a').first.click()
                       assert page.locator('.menu').get_attribute('aria-expanded') == 'false'
                   print('PASS LIVE BROWSER', width, json.dumps(images))
+                  page.screenshot(path='live-'+str(width)+'.png', full_page=True)
                   page.close()
               browser.close()
           print('ALL LIVE CHECKS PASSED')
           PY
+      - name: Save live browser screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-site-real-photos
+          path: live-*.png
+          retention-days: 2
